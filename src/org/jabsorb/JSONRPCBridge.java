@@ -547,6 +547,7 @@ public class JSONRPCBridge implements Serializable
       }
     }
     ser = new JSONSerializer(serializerStateClass,requestParser);
+    referenceSerializer = new ReferenceSerializer(this);
     try
     {
       for (Serializer s : serializers)
@@ -569,7 +570,6 @@ public class JSONRPCBridge implements Serializable
     classMap = new HashMap<String, Class<?>>();
     objectMap = new HashMap<Object, ObjectInstance>();
     referenceMap = new HashMap<Integer, Object>();
-    referenceSerializer = new ReferenceSerializer(this);
     referenceSet = new HashSet<Class<?>>();
     callableReferenceSet = new HashSet<Class<?>>();
     referencesEnabled = false;
