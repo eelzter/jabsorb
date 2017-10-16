@@ -30,11 +30,11 @@ import java.beans.BeanInfo;
 import java.beans.IntrospectionException;
 import java.beans.Introspector;
 import java.beans.PropertyDescriptor;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
+import java.lang.reflect.Modifier;
+import java.util.*;
 
 import org.jabsorb.serializer.AbstractSerializer;
 import org.jabsorb.serializer.MarshallException;
@@ -73,7 +73,14 @@ public class BeanSerializer extends AbstractSerializer
      * The writable properties of the bean.
      */
     public Map<String,Method> writableProps;
+
+    /**
+     * The public field names of the bean
+     */
+    public Set<String> publicFields;
   }
+
+
 
   /**
    * Unique serialisation id.
@@ -117,6 +124,18 @@ public class BeanSerializer extends AbstractSerializer
   {
     log.info("analyzing " + clazz.getName());
     BeanData bd = new BeanData();
+
+    bd.publicFields = new HashSet();
+    Field[] fields = clazz.getFields();
+    for (int i = 0;i < fields.length; i++)
+    {
+      Field f = fields[i];
+      if(Modifier.isPublic(f.getModifiers()))
+      {
+        bd.publicFields.add(f.getName());
+      }
+    }
+
     bd.beanInfo = Introspector.getBeanInfo(clazz, Object.class);
     PropertyDescriptor props[] = bd.beanInfo.getPropertyDescriptors();
     bd.readableProps = new HashMap<String, Method>();
@@ -124,7 +143,7 @@ public class BeanSerializer extends AbstractSerializer
     for (int i = 0; i < props.length; i++)
     {
       //This is declared by enums and shouldn't be shown.
-      if(props[i].getName().equals("declaringClass"))
+      if(props[i].getName().equals("declaringClass") || bd.publicFields.contains(props[i].getName()))
       {
         continue;
       }
@@ -137,6 +156,7 @@ public class BeanSerializer extends AbstractSerializer
         bd.readableProps.put(props[i].getName(), props[i].getReadMethod());
       }
     }
+
     return bd;
   }
 
@@ -208,6 +228,7 @@ public class BeanSerializer extends AbstractSerializer
       try
       {
         result = getMethod.invoke(o, args);
+        addPropToVal(val, state, o, result, prop);
       }
       catch (Throwable e)
       {
@@ -218,30 +239,55 @@ public class BeanSerializer extends AbstractSerializer
         throw new MarshallException("bean " + o.getClass().getName()
             + " can't invoke " + getMethod.getName() + ": " + e.getMessage(), e);
       }
+    }
+
+    Iterator j = bd.publicFields.iterator();
+    while(j.hasNext())
+    {
+      String fieldName = (String) j.next();
       try
       {
-        if (result != null || ser.getMarshallNullAttributes())
-        {
-          try
-          {
-            Object json = ser.marshall(state, o, result, prop);
-            val.put(prop, json);
-          }
-          catch (JSONException e)
-          {
-            throw new MarshallException(
-              "JSONException: " + e.getMessage(), e);
-          }
-        }
+        result = o.getClass().getField(fieldName).get(o);
+        addPropToVal(val, state, o, result, fieldName);
       }
-      catch (MarshallException e)
+      catch(NoSuchFieldException nsfe)
       {
-        throw new MarshallException("bean " + o.getClass().getName() + " "
-            + e.getMessage(), e);
+        throw new MarshallException("bean " + o.getClass().getName()
+                + " can't read field " + fieldName + ": " + nsfe.getMessage(), nsfe);
+      }
+      catch(IllegalAccessException iae)
+      {
+        throw new MarshallException("bean " + o.getClass().getName()
+                + " can't access field " + fieldName + ": " + iae.getMessage(), iae);
       }
     }
 
     return val;
+  }
+
+  private void addPropToVal(JSONObject val, SerializerState state, Object o, Object result, String prop) throws MarshallException
+  {
+    try
+    {
+      if (result != null || ser.getMarshallNullAttributes())
+      {
+        try
+        {
+          Object json = ser.marshall(state, o, result, prop);
+          val.put(prop, json);
+        }
+        catch (JSONException e)
+        {
+          throw new MarshallException(
+            "JSONException: " + e.getMessage(), e);
+        }
+      }
+    }
+    catch (MarshallException e)
+    {
+      throw new MarshallException("bean " + o.getClass().getName() + " "
+          + e.getMessage(), e);
+    }
   }
 
   public ObjectMatch tryUnmarshall(SerializerState state, Class<?> clazz, Object o)
@@ -264,6 +310,10 @@ public class BeanSerializer extends AbstractSerializer
     {
       String prop = ent.getKey();
       if (jso.has(prop))
+      {
+        match++;
+      }
+      else if(bd.publicFields.contains(prop))
       {
         match++;
       }
@@ -425,6 +475,45 @@ public class BeanSerializer extends AbstractSerializer
           throw new UnmarshallException("bean " + clazz.getName()
               + "can't invoke " + setMethod.getName() + ": " + e.getMessage(), e);
         }
+      }
+      else if(bd.publicFields.contains(field))
+      {
+        try
+          {
+            Class<?> fieldClass = clazz.getField(field).getType();
+            fieldVal = ser.unmarshall(state, fieldClass, jso.get(field));
+          }
+          catch (NoSuchFieldException e)
+          {
+            throw new UnmarshallException(
+              "could not unmarshall field \"" + field + "\" of bean " +
+              clazz.getName(), e);
+          }
+          catch (JSONException e)
+          {
+            throw new UnmarshallException(
+                "could not unmarshall field \"" + field + "\" of bean " +
+                clazz.getName(), e);
+          }
+          if (log.isDebugEnabled())
+          {
+            log.debug("getting value " + field + ": " + fieldVal);
+          }
+          try
+          {
+            Field f = clazz.getField(field);
+            if(!Modifier.isFinal(f.getModifiers()))
+              clazz.getField(field).set(instance, fieldVal);
+          }
+          catch (Throwable e)
+          {
+            if (e instanceof InvocationTargetException)
+            {
+              e = ((InvocationTargetException) e).getTargetException();
+            }
+            throw new UnmarshallException("bean " + clazz.getName()
+                + "can't invoke " + setMethod.getName() + ": " + e.getMessage(), e);
+          }
       }
     }
     return instance;
